@@ -57,9 +57,9 @@ jobs:
           echo "TWRP sources extracted successfully"
       
       - name: Clone device tree
-        run: |
-          cd $HOME/twrp
-          git clone https://github.com/${{ env.DEVICE_VENDOR }}/android_device_${{ env.DEVICE_VENDOR }}_${{ env.DEVICE_CODENAME }}.git device/${{ env.DEVICE_VENDOR }}/${{ env.DEVICE_CODENAME }}
+  run: |
+    cd $HOME/twrp
+    git clone https://github.com/${{ github.repository_owner }}/android_device_${{ env.DEVICE_CODENAME }}.git device/${{ env.DEVICE_VENDOR }}/${{ env.DEVICE_CODENAME }}
       
       - name: Clone recovery sources
         run: |
