@@ -1,0 +1,146 @@
+name: Build TWRP Recovery
+
+on:
+  push:
+    branches:
+      - main
+    tags-ignore:
+      - 'v*'
+      - 'untagged-*'
+  workflow_dispatch:
+
+env:
+  TWRP_VERSION: v3.4.0-20201103
+  ANDROID_VERSION: '6.0'
+  DEVICE_VENDOR: wheatek
+  DEVICE_CODENAME: WP15
+  BUILD_FLAVOR: eng
+  DOCKER_IMAGE: fr3akyphantom/droid-builder:latest
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    
+    permissions:
+      contents: read
+      packages: read
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Set up environment
+        run: |
+          mkdir -p $HOME/twrp
+          echo "BUILD_DATE=$(date +%Y%m%d)" >> $GITHUB_ENV
+          echo "TWRP_SOURCE_URL=https://github.com/PhantomZone54/twrp_sources_norepo/releases/download/${{ env.TWRP_VERSION }}/MinimalOmniRecovery-twrp-${{ env.ANDROID_VERSION }}-norepo-20201103.tzst" >> $GITHUB_ENV
+      
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y aria2 zstd xz-utils
+      
+      - name: Download TWRP sources
+        run: |
+          cd $HOME/twrp
+          echo "Downloading TWRP sources..."
+          aria2c -x16 -s8 --console-log-level=error --summary-interval=0 "${{ env.TWRP_SOURCE_URL }}" -o twrp.tzst || \
+          wget -q --show-progress --progress=bar:force "${{ env.TWRP_SOURCE_URL }}" -O twrp.tzst
+          
+          if [ ! -f twrp.tzst ]; then
+            echo "Failed to download TWRP sources"
+            exit 1
+          fi
+          
+          tar --zstd -xf twrp.tzst --directory $HOME/twrp/
+          rm twrp.tzst
+          echo "TWRP sources extracted successfully"
+      
+      - name: Clone device tree
+        run: |
+          cd $HOME/twrp
+          git clone https://github.com/${{ env.DEVICE_VENDOR }}/android_device_${{ env.DEVICE_VENDOR }}_${{ env.DEVICE_CODENAME }}.git device/${{ env.DEVICE_VENDOR }}/${{ env.DEVICE_CODENAME }}
+      
+      - name: Clone recovery sources
+        run: |
+          cd $HOME/twrp
+          rm -rf bootable/recovery
+          git clone https://github.com/omnirom/android_bootable_recovery -b android-9.0 --depth 1 bootable/recovery
+      
+      - name: Set up Docker
+        run: |
+          docker pull ${{ env.DOCKER_IMAGE }}
+      
+      - name: Build recovery image
+        run: |
+          cd $HOME/twrp
+          docker run --rm -i \
+            -e USER_ID=$(id -u) \
+            -e GROUP_ID=$(id -g) \
+            -v "$(pwd):/home/builder/twrp/:rw,z" \
+            -v "$HOME/.ccache:/srv/ccache:rw,z" \
+            ${{ env.DOCKER_IMAGE }} bash << 'DOCKER_EOF'
+          set -e
+          cd /home/builder/twrp/
+          source build/envsetup.sh
+          lunch omni_${{ env.DEVICE_CODENAME }}-${{ env.BUILD_FLAVOR }}
+          make -j$(nproc --all) recoveryimage
+          DOCKER_EOF
+      
+      - name: Extract version and prepare artifact
+        run: |
+          cd $HOME/twrp
+          if [ ! -f bootable/recovery/variables.h ]; then
+            echo "variables.h not found"
+            exit 1
+          fi
+          
+          VERSION=$(grep "define TW_MAIN_VERSION_STR" bootable/recovery/variables.h | cut -d '"' -f2)
+          echo "VERSION=${VERSION}" >> $GITHUB_ENV
+          
+          RECOVERY_IMG="out/target/product/${{ env.DEVICE_CODENAME }}/recovery.img"
+          if [ ! -f "$RECOVERY_IMG" ]; then
+            echo "Recovery image not found at $RECOVERY_IMG"
+            exit 1
+          fi
+          
+          ARTIFACT_NAME="TWRP-${VERSION}-${{ env.DEVICE_CODENAME }}-${{ env.BUILD_DATE }}-Unofficial.img"
+          cp "$RECOVERY_IMG" "$ARTIFACT_NAME"
+          echo "ARTIFACT_NAME=${ARTIFACT_NAME}" >> $GITHUB_ENV
+          echo "Artifact prepared: ${ARTIFACT_NAME}"
+      
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        if: success()
+        with:
+          name: twrp-recovery
+          path: ${{ env.HOME }}/twrp/${{ env.ARTIFACT_NAME }}
+          retention-days: 30
+      
+      - name: Create Release (on tags)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v1
+        with:
+          files: ${{ env.HOME }}/twrp/${{ env.ARTIFACT_NAME }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      
+      - name: Handle build failure
+        if: failure()
+        run: |
+          echo "Build failed! Check logs above for details."
+          exit 1
+
+  notify:
+    runs-on: ubuntu-latest
+    needs: build
+    if: always()
+    
+    steps:
+      - name: Build status
+        run: |
+          if [ "${{ needs.build.result }}" = "success" ]; then
+            echo "✅ Build completed successfully"
+          else
+            echo "❌ Build failed"
+          fi
